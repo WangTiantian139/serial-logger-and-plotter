@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Serial Logger and Plotter</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@2.8.0"></script>
+  </head>
+  <body>
+    <canvas id="myChart" height="100"></canvas>
+    <div>
+      <button id="butConnect">connect</button><span style="padding: 1%"></span
+      ><button id="butEnd">end</button>
+    </div>
+    <div style="margin: 10px">Received:</div>
+    <div id="received-data-list" style="border: groove; margin: 10px"></div>
+    <script>
+      /*** find the chart and list tag below ***/
+      var ctx = document.getElementById("myChart").getContext("2d");
+      var chart = new Chart(ctx, {
+        // The type of chart we want to create
+        type: "line",
+
+        // The data for our dataset
+        data: {
+          labels: [],
+          datasets: [
+            {
+              label: "ugpm3",
+              borderColor: "rgb(255, 99, 132)",
+              data: [],
+              fill: false,
+            },
+            {
+              label: "heat",
+              borderColor: "blue",
+              data: [],
+              fill: false,
+            },
+            {
+              label: "humidity",
+              borderColor: "green",
+              data: [],
+              fill: false,
+            },
+          ],
+        },
+        // Configuration options go here
+        options: {
+          title: {
+            display: true,
+            text: new Date().toLocaleDateString(),
+          },
+        },
+      });
+
+      const dataList = document.getElementById("received-data-list");
+      /*** find the chart and list tag above***/
+
+      /*** butConnect listener below ***/
+      let keepReading = true;
+      let reader;
+      let writer;
+      // all data parsed are stored in a list ordered by received time of the data frame.
+      let receivedframe = [];
+
+      document
+        .getElementById("butConnect")
+        .addEventListener("click", async () => {
+          const port = await navigator.serial.requestPort();
+          await port.open({ baudRate: 9600 }); // set baud rate
+          keepReading = true;
+          reader = port.readable.getReader();
+          writer = port.writable.getWriter();
+
+          // set how to write to device intervally
+          const writeInt = setInterval(async () => {
+            const commandframe = new Uint8Array([
+              0x00,
+              0xff,
+              /*...some bytes to be sent*/
+            ]);
+            await writer.write(commandframe);
+          }, 3000); // send a frame every 3000ms
+
+          while (port.readable && keepReading) {
+            try {
+              while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                  // Allow the serial port to be closed later.
+                  reader.releaseLock();
+                  // Allow the serial port to be closed later.
+                  writer.releaseLock();
+                  break;
+                }
+                if (value) {
+                  /*** TODO: deal with the data value ***/
+                  dealWithData(value);
+                }
+              }
+            } catch (error) {
+              // Handle non-fatal read error.
+              console.error(error);
+            } finally {
+              console.log(port.readable, keepReading);
+            }
+          }
+          clearInterval(writeInt);
+          await port.close();
+          console.log("port closed");
+        });
+      /*** butConnect listener above ***/
+
+      /*** function dealWithData below ***/
+      function dealWithData(value) {
+        // check the frame
+        function checkSum(buf) {
+          let checksum = 0;
+          buf.forEach((val, idx) => {
+            if (idx > 0 && idx < 12) {
+              checksum += val;
+            } else if (idx == 12) {
+              checksum = (~checksum & 0xff) + 1;
+            }
+          });
+          return buf[12] == checksum;
+        }
+
+        if (checkSum(value)) {
+          // parse the frame
+          let ugpm3 = (value[2] << 8) | value[3];
+          let heat = ((value[8] << 8) | value[9]) / 100;
+          let humidity = ((value[10] << 8) | value[11]) / 100;
+          let datatime = new Date();
+          let frame = {
+            datatime,
+            ugpm3,
+            heat,
+            humidity,
+          };
+
+          // record the frame
+          receivedframe.push(frame);
+
+          // print data on the page
+          dataList.innerHTML += `<p>[${datatime.toLocaleString()}] -> ugpm3: ${ugpm3}, heat: ${heat}, humidity: ${humidity}</p>`;
+
+          // update the chart
+          chart.data.labels.push(datatime.toLocaleTimeString());
+          chart.data.datasets.forEach((dataset) => {
+            dataset.data.push(frame[dataset.label]);
+          });
+          chart.update();
+        }
+      }
+      /*** function dealWithData above ***/
+
+      /*** butEnd listener below ***/
+      document.getElementById("butEnd").addEventListener("click", async () => {
+        keepReading = false;
+        reader.cancel();
+        // create a new handle
+        const jsonHandle = await window.showSaveFilePicker();
+        // create a FileSystemWritableFileStream to write to
+        const writableStream = await jsonHandle.createWritable();
+        // write our file
+        const aBlob = new Blob([JSON.stringify(receivedframe)], {
+          type: "text/plain",
+        });
+        await writableStream.write(aBlob);
+        receivedframe = [];
+        // close the file and write the contents to disk.
+        await writableStream.close();
+      });
+      /*** butEnd listener above ***/
+    </script>
+  </body>
+</html>
